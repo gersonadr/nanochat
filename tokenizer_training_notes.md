@@ -213,6 +213,32 @@ All evaluation tasks in nanochat (MMLU, GSM8K, ARC, HumanEval) are English-only,
 | `--doc-cap` | 10,000 chars | Prevents a single huge document from dominating pair counts |
 | Special tokens | 8, added post-training | Never merged; always exact IDs; not learned by BPE |
 
+### Three separate limits — not the same thing
+
+These are easy to confuse because all three use the word "characters", but they operate at completely different levels:
+
+| Limit | Where | What it caps | Why |
+|---|---|---|---|
+| `\p{N}{1,2}` | regex split pattern | Digits per pre-tokenization chunk | Saves vocab slots from being spent on long numbers |
+| `--doc-cap 10_000` | `tok_train.py` | Characters per individual document | Prevents one huge doc from dominating pair counts |
+| `--max-chars 2_000_000_000` | `tok_train.py` | Total characters read from the corpus | Training time budget; stop consuming data after 2B chars |
+
+From `tok_train.py:28-43`:
+
+```python
+def text_iterator():
+    nchars = 0
+    for batch in parquets_iter_batched(split="train"):
+        for doc in batch:
+            doc_text = doc[:args.doc_cap]   # cap each doc at 10,000 chars
+            nchars += len(doc_text)
+            yield doc_text
+            if nchars > args.max_chars:     # stop after 2B chars total
+                return
+```
+
+`--max-chars` has nothing to do with digits or merge boundaries — it is purely a training budget that controls how much of the 400B-token corpus the BPE trainer actually sees.
+
 ### Special tokens
 
 ```python
