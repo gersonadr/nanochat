@@ -44,11 +44,19 @@ Each row is the model's answer to: *"given everything I've seen up to this posit
 For input `["Hello", "world"]` with a 5-token vocabulary:
 
 ```
+                col 0    col 1   col 2    col 3     col 4
               "Hello"  "world"    "!"   "goodbye"  "<end>"
               ───────  ───────  ──────  ─────────  ───────
-position 0:  [ -1.2,    3.4,    0.8,    -2.1,      0.1  ]
-position 1:  [ -0.5,   -1.1,    4.7,    -3.2,      2.1  ]
+position 0:  [ -1.2,    3.4,    0.8,    -2.1,      0.1  ]  ← after seeing "Hello"
+position 1:  [ -0.5,   -1.1,    4.7,    -3.2,      2.1  ]  ← after seeing "Hello world"
 ```
+
+- **Row (position)**: which prefix the model has seen so far. Position 0 has only seen `"Hello"`. Position 1 has seen `"Hello world"`.
+- **Column**: which vocabulary token the score is for. Col 0 = score for `"Hello"` being next, col 1 = score for `"world"` being next, col 2 = score for `"!"` being next, and so on.
+
+So reading position 0 across its columns: after seeing `"Hello"`, the model gives `"world"` (col 1) the highest score of 3.4 — meaning it thinks `"world"` is the most likely next token.
+
+Reading position 1 across its columns: after seeing `"Hello world"`, the model gives `"!"` (col 2) the highest score of 4.7 — meaning it thinks `"!"` is the most likely next token.
 
 These are raw scores, not probabilities yet. To turn them into probabilities, apply **softmax**:
 
