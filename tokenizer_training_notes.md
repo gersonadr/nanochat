@@ -424,3 +424,219 @@ Added after BPE finishes, assigned the highest IDs. The regex ensures BPE never 
 ### token_bytes.pt
 
 After training, `tok_train.py` computes and saves a tensor mapping every token ID to its UTF-8 byte length. This is used by `loss_eval.py` to compute **bits per byte (BPB)** — a vocab-size-invariant loss metric that allows fair comparison between models with different vocabulary sizes.
+
+---
+
+## How runtimes know which tokenizer to use
+
+Models do not ship executable code. The tokenizer is data bundled with the model artifact — the runtime provides the algorithm implementation, and the model provides the vocabulary and configuration.
+
+### HuggingFace format (multiple files)
+
+A HuggingFace model repository contains both weights and tokenizer as separate files:
+
+```
+model/
+├── model.safetensors        ← weights
+├── tokenizer.json           ← vocabulary + merge rules + regex pattern
+├── tokenizer_config.json    ← tokenizer class name, special tokens
+└── special_tokens_map.json
+```
+
+`tokenizer_config.json` stores a string class name like `"LlamaTokenizer"`. The runtime (`transformers` library) matches that string against a hardcoded registry of classes it already has compiled in:
+
+```python
+TOKENIZER_MAPPING = {
+    "LlamaTokenizer":            LlamaTokenizer,
+    "GPT2Tokenizer":             GPT2Tokenizer,
+    "BertTokenizer":             BertTokenizer,
+    ...
+}
+cls = TOKENIZER_MAPPING[config["tokenizer_class"]]
+tokenizer = cls.from_pretrained(model_dir)
+```
+
+All those classes are Python code that ships with the `transformers` package — not with the model. The model provides the **name** and the **data**; the runtime provides the **algorithm**.
+
+If a model uses an unknown class name (e.g. a new architecture released before the library was updated), the runtime errors or falls back. This is a real compatibility problem. The newer `tokenizer.json` format solves it by making the tokenizer fully reconstructable from data alone — no class name needed.
+
+### GGUF format (single file, used by Ollama)
+
+GGUF embeds everything — weights, vocabulary, merge rules, special tokens, metadata — in one binary file. It stores a type identifier (`"gpt2"`, `"llama"`) rather than a class name, which maps to one of a small number of tokenizer algorithms hardcoded in llama.cpp (C++). No class registry, no extensibility — if the type is unknown, the file cannot be run.
+
+### Summary
+
+| Layer | Who provides it | Language |
+|---|---|---|
+| Algorithm (how BPE merging works) | Runtime (transformers / llama.cpp / tiktoken) | Python / C++ / Rust |
+| Class registry (name → algorithm) | Runtime | Python / C++ |
+| Vocabulary + merge rules | Model file | Data (JSON / binary) |
+| Class name or type identifier | Model file | String in JSON / GGUF metadata |
+
+Models ship **data and identifiers**, never code.
+
+---
+
+## Reconstructing a tokenizer from data alone
+
+Given only three pieces of data from `tokenizer.json`, you can build a fully working tokenizer with no model-specific code.
+
+### The three pieces
+
+**1. Regex pattern** — stored as a plain string, compiled at load time. Identical to the `SPLIT_PATTERN` used during training.
+
+```json
+{ "pre_tokenizer": { "pattern": { "Regex": "'(?i:[sdmt]|ll|ve|re)|..." } } }
+```
+
+**2. Vocabulary** — a dict mapping every token (as a string) to its integer ID:
+
+```json
+{
+  "vocab": {
+    "!":       0,
+    "Ġ":     220,
+    "th":    256,
+    "Ġthe":  259,
+    "Ġworld": 995
+  }
+}
+```
+
+The `Ġ` is not a real character — it is a stand-in for the space byte `0x20`. HuggingFace's `ByteLevel` pre-tokenizer maps every byte (0–255) to a printable Unicode character so the vocabulary can be stored as readable JSON. This mapping is fixed and identical for all models that use `ByteLevel`:
+
+```python
+def bytes_to_unicode():
+    # Printable ASCII and Latin chars map to themselves
+    bs = list(range(ord("!"), ord("~")+1)) + \
+         list(range(ord("¡"), ord("¬")+1)) + \
+         list(range(ord("®"), ord("ÿ")+1))
+    cs = list(bs)
+    # Control chars, space, etc. → chars starting at U+0100
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b)
+            cs.append(256 + n)
+            n += 1
+    return dict(zip(bs, map(chr, cs)))
+
+BYTE_TO_UNICODE = bytes_to_unicode()
+# 0x20 (space) → 'Ġ'
+# 0x09 (tab)   → 'Ā'
+# 0x48 ('H')   → 'H'   (printable ASCII maps to itself)
+```
+
+So `"Ġworld"` in the vocab means the token whose actual bytes are `b' world'`. tiktoken/nanochat skip this layer entirely and store raw `bytes` objects directly.
+
+**3. Merge rules** — an ordered list of pairs, one per merge performed during training:
+
+```json
+{
+  "merges": [
+    "t h",
+    "th e",
+    "Ġ t",
+    "Ġt he",
+    "Ġ the",
+    ...
+  ]
+}
+```
+
+Line 0 was the first merge (most frequent pair in the corpus). Line 32,759 was the last. **The order encodes priority** — this is all you need to reconstruct `mergeable_ranks`:
+
+```python
+UNICODE_TO_BYTE = {v: k for k, v in BYTE_TO_UNICODE.items()}
+
+# Seed with all 256 base bytes
+mergeable_ranks = {bytes([i]): i for i in range(256)}
+
+# Replay merges in order → each gets the next available rank
+for rank, merge_str in enumerate(merges_list):
+    a, b = merge_str.split(" ")
+    a_bytes = bytes([UNICODE_TO_BYTE[c] for c in a])
+    b_bytes = bytes([UNICODE_TO_BYTE[c] for c in b])
+    mergeable_ranks[a_bytes + b_bytes] = 256 + rank
+```
+
+After this loop you have the exact same `mergeable_ranks` dict tiktoken uses — derived purely from the merge list, no model code needed.
+
+### Why both vocab and merge rules are stored
+
+They are redundant — the vocab is derivable from the merges — but serve different purposes:
+
+| Data | Used for |
+|---|---|
+| `merges` | Encoding — tells you which pair to merge and in what order |
+| `vocab` | Decoding — maps final token bytes to integer IDs; enables O(1) token → string lookup |
+
+### Full working implementation
+
+```python
+import regex, json
+
+with open("tokenizer.json") as f:
+    data = json.load(f)
+
+SPLIT_PATTERN = data["pre_tokenizer"]["pattern"]["Regex"]
+vocab         = data["model"]["vocab"]      # {"Ġworld": 995, ...}
+merges_list   = data["model"]["merges"]     # ["t h", "th e", ...]
+
+# build byte ↔ unicode mapping
+BYTE_TO_UNICODE = bytes_to_unicode()        # function defined above
+UNICODE_TO_BYTE = {v: k for k, v in BYTE_TO_UNICODE.items()}
+
+# reconstruct mergeable_ranks from merge list
+mergeable_ranks = {bytes([i]): i for i in range(256)}
+for rank, merge_str in enumerate(merges_list):
+    a, b = merge_str.split(" ")
+    a_bytes = bytes([UNICODE_TO_BYTE[c] for c in a])
+    b_bytes = bytes([UNICODE_TO_BYTE[c] for c in b])
+    mergeable_ranks[a_bytes + b_bytes] = 256 + rank
+
+# reconstruct vocab as bytes → id
+token_to_id = {
+    bytes([UNICODE_TO_BYTE[c] for c in token_str]): token_id
+    for token_str, token_id in vocab.items()
+}
+
+def encode_chunk(chunk: str) -> list[int]:
+    parts = [bytes([b]) for b in chunk.encode("utf-8")]
+    while True:
+        best_rank, best_idx = float("inf"), -1
+        for i in range(len(parts) - 1):
+            rank = mergeable_ranks.get(parts[i] + parts[i+1], float("inf"))
+            if rank < best_rank:
+                best_rank, best_idx = rank, i
+        if best_idx == -1:
+            break
+        parts[best_idx] = parts[best_idx] + parts[best_idx+1]
+        parts.pop(best_idx + 1)
+    return [token_to_id[token] for token in parts]
+
+def encode(text: str) -> list[int]:
+    return [id for chunk in regex.findall(SPLIT_PATTERN, text)
+               for id in encode_chunk(chunk)]
+```
+
+### Concrete trace: encoding `"the"`
+
+```
+merges[0] = "t h"   → rank 256
+merges[1] = "th e"  → rank 257
+vocab["the"] = 258
+
+encode("the")
+  pre-tokenize → ["the"]
+  bytes        → [b't', b'h', b'e']
+
+  pairs: b'th'→256 (lowest), b'he'→412
+  merge → [b'th', b'e']
+
+  pairs: b'the'→257 (only option)
+  merge → [b'the']
+
+  look up → token_to_id[b'the'] = 258
+  result: [258]
+```
