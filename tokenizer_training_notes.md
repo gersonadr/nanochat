@@ -95,7 +95,11 @@ iteration N:  b' information' → id 32751
 
 Nanochat trains for `vocab_size - len(SPECIAL_TOKENS) = 32768 - 8 = 32760` merges (`tokenizer.py:175-176`).
 
-**The corpus pass cost.** Each iteration (Steps 3–4) requires a full scan of the entire corpus to recount pairs after the previous merge. The algorithm makes **one full corpus pass per merge** — so for a vocabulary of 32,760 learned merges, the corpus is scanned 32,760 times in total. This is why tokenizer training is its own dedicated step run once before pretraining, and why training it on the full 400B corpus would be prohibitively slow. The 2B character budget (`--max-chars`) is a direct trade-off against this cost.
+**The corpus pass cost.**
+
+> **number of corpus passes = number of merges = vocab_size − 256**
+
+Each iteration (Steps 3–4) requires a full scan of the entire corpus to recount pairs after the previous merge. For nanochat that is **32,760 full passes** over 2B characters. This is why tokenizer training is its own dedicated step run once before pretraining, and why training it on the full 400B corpus would be prohibitively slow. The 2B character budget (`--max-chars`) is a direct trade-off against this cost.
 
 ### What the output looks like
 
