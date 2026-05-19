@@ -427,6 +427,57 @@ After training, `tok_train.py` computes and saves a tensor mapping every token I
 
 ---
 
+## Evaluating tokenizer quality (`tok_eval.py`)
+
+### The metric: compression ratio
+
+```python
+ratio = len(text.encode('utf-8')) / len(tokenizer.encode(text))
+```
+
+Bytes divided by tokens. **Higher is better** — more bytes per token means each token carries more information, shorter sequences, and less compute for the model downstream.
+
+| Ratio | Meaning |
+|---|---|
+| ~1.0 | No compression — every byte is its own token |
+| ~3.0 | Decent — common short words are single tokens |
+| ~4.0+ | Good — most common words are one token |
+
+### What it tests
+
+Five hand-picked text types, each probing a different dimension:
+
+| Sample | What it tests |
+|---|---|
+| `news_text` | Everyday English prose |
+| `korean_text` | Non-English script (expected to be poor) |
+| `code_text` | Python source code |
+| `math_text` | LaTeX math notation |
+| `science_text` | Dense technical English |
+| `fwe-train` | Actual training data — tokenizer saw this, expected highest ratio |
+| `fwe-val` | Held-out validation data — the honest number |
+
+Then benchmarks nanochat's tokenizer against GPT-2 (50K vocab) and GPT-4 (`cl100k_base`, ~100K vocab).
+
+### What to expect
+
+- **English prose**: nanochat competitive with GPT-2, worse than GPT-4 (smaller vocab = fewer whole-word tokens)
+- **Korean**: all three poor; GPT-4 less so because its larger vocab has more non-Latin coverage
+- **Code**: all decent — short repetitive tokens (`def`, `self`, `=`) get picked up regardless of vocab size
+- **Training data**: nanochat's highest ratio — exactly the documents it was trained on
+- **Validation data**: slightly lower — the fair generalisation measure
+
+### The roundtrip assert
+
+```python
+decoded = tokenizer.decode(encoded)
+assert decoded == text
+```
+
+Every test also verifies encode → decode returns the **exact original string**. This catches lossy byte handling, Unicode encoding bugs, or missing character coverage. A tokenizer that cannot roundtrip perfectly is broken regardless of its compression ratio.
+
+---
+
 ## How runtimes know which tokenizer to use
 
 Models do not ship executable code. The tokenizer is data bundled with the model artifact — the runtime provides the algorithm implementation, and the model provides the vocabulary and configuration.
