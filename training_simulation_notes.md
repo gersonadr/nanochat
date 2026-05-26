@@ -56,6 +56,8 @@ A second set of learned numbers — one vector per vocabulary token, same size a
 
 The weight matrix is what the model uses to *score* how likely each vocabulary token is to come next. Where embeddings answer "what is this token?", weight vectors answer "how well does something match this token?".
 
+Like embeddings, all weight vectors start as **random numbers** and are adjusted during training. Neither the embeddings nor the weights have any meaningful values before training begins — they are noise, and training is the process of turning that noise into something useful.
+
 ---
 
 ### Dot product
