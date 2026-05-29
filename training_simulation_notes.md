@@ -131,6 +131,32 @@ gradient for dim d = (predicted_prob - 1) × e_input[d]       ← for the predic
 
 The `(predicted_prob - 1)` factor is the error: it is 0 if the model was perfect (probability = 1), and more negative the worse the model was.
 
+**Why this formula? The chain rule through a multiplication.**
+
+The score is computed as a dot product:
+
+```
+score_world = e_hello[0] × w_world[0] + e_hello[1] × w_world[1]
+```
+
+If you increase `w_world[0]` by a tiny amount, `score_world` changes in proportion to `e_hello[0]` — because that is what `w_world[0]` is multiplied by. The chain rule captures this:
+
+```
+gradient of w_world[0] = error × e_hello[0]
+gradient of w_world[1] = error × e_hello[1]
+```
+
+And symmetrically, `e_hello[0]` is multiplied by `w_world[0]`, so:
+
+```
+gradient of e_hello[0] = error × w_world[0]
+gradient of e_hello[1] = error × w_world[1]
+```
+
+The pattern: **each value's gradient = error × the other value it was multiplied with.**
+
+The error is negative when the model was wrong (e.g. `-0.756`). Subtracting a negative gradient means the values increase — which increases the score for the correct token. That is how the model corrects itself.
+
 ---
 
 ### Learning rate
